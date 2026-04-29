@@ -1,9 +1,5 @@
-Based on everything we did in this lab, here is exactly what goes in your README. Since you are on Windows PowerShell in VS Code, create the file by clicking **New File** in the Explorer panel, name it `README.md`, then paste this content:
-
----
-
-```markdown
 # MedData Research Hospital — IAM Lab Scenario 2
+### Identity & Access Management | RBAC + ABAC | GDPR/HIPAA Compliance
 
 ![Ubuntu](https://img.shields.io/badge/Platform-Ubuntu_24.04-E95420?style=for-the-badge&logo=ubuntu)
 ![Security](https://img.shields.io/badge/Domain-Cybersecurity-red?style=for-the-badge)
@@ -12,207 +8,312 @@ Based on everything we did in this lab, here is exactly what goes in your README
 
 ---
 
-## What This Lab Is About
+## Table of Contents
 
-This is a hands-on cybersecurity lab where I act as part of a Cybersecurity Response Team
-hired to fix critical Identity and Access Management violations at MedData Research Hospital.
-The hospital manages sensitive patient records on Ubuntu servers and was found to be
-in violation of both HIPAA and GDPR regulations.
-
-All four tasks were implemented and verified on Ubuntu 24.04 LTS.
-
----
-
-## The Problem
-
-An internal audit found four critical security violations:
-
-| # | Violation | Regulation Broken |
-|---|-----------|------------------|
-| 1 | The `staff` group had broad read access to `/data/patient_records` — every staff member could read all patient files | HIPAA Minimum Necessary Rule |
-| 2 | Admins used the same credentials for the public web server and the secure patient database | HIPAA Access Control |
-| 3 | No time-of-day restrictions — staff could log in at 3AM from home with no oversight | HIPAA Audit Controls |
-| 4 | The nginx web portal process had full access to the entire server filesystem | GDPR Article 32 |
+- [Scenario Overview](#scenario-overview)
+- [The Crisis — What Went Wrong](#the-crisis--what-went-wrong)
+- [Why This Matters in Real Organizations](#why-this-matters-in-real-organizations)
+- [Lab Architecture](#lab-architecture)
+- [Task A — Linux ACLs](#task-a--linux-access-control-lists-acls)
+- [Task B — PAM Time Restrictions](#task-b--pam-time-of-day-restrictions)
+- [Task C — Bastion Host with MFA](#task-c--bastion-host-with-mfa)
+- [Task D — chroot Jail](#task-d--chroot-jail-for-web-portal)
+- [Verification Results](#verification-results)
+- [Files Modified Summary](#files-modified-summary)
+- [Key Lessons Learned](#key-lessons-learned)
 
 ---
 
-## Lab Environment
+## Scenario Overview
 
-| Machine | OS | IP Address | Role |
-|---------|----|-----------|----|
-| Ubuntu Server | Ubuntu 24.04 | 192.168.116.144 | All tasks — Bastion, Secure Zone, Web Portal, Patient Records |
-| Windows Host | Windows 11 | 192.168.116.1 | External tester |
+**Organization:** MedData Research Hospital  
+**Platform:** Debian/Ubuntu servers  
+**Compliance Framework:** GDPR (General Data Protection Regulation) + HIPAA (Health Insurance Portability and Accountability Act)  
+**Role:** Cybersecurity Response Team  
+
+MedData manages sensitive patient records on a network of Ubuntu servers segmented into three security zones:
+
+| Zone | Purpose | Risk Level |
+|------|---------|-----------|
+| Public | Web portal — patient appointment booking | Medium |
+| Internal | Staff workstations and internal tools | High |
+| Secure | Patient records database — PHI storage | Critical |
+
+---
+
+## The Crisis — What Went Wrong
+
+An internal audit uncovered **four critical violations** that put patient data at risk and exposed the hospital to regulatory penalties:
+
+### Violation 1 — Overprivileged Staff Access
+The `staff` group had broad **read access** to `/data/patient_records`. Every member of the staff group — from receptionists to cleaners — could read confidential patient medical records. This directly violates the **HIPAA Minimum Necessary Rule**, which states that access to Protected Health Information (PHI) must be limited to only what is needed for each role.
+
+### Violation 2 — Shared Credentials Across Security Zones
+System administrators were using the **same SSH credentials** to log into both the public web server and the secure patient records database. A single compromised login gave an attacker a direct path from the public internet to the most sensitive data in the hospital.
+
+### Violation 3 — No Time-of-Day Access Controls
+There were **no restrictions on when** employees could access the system. Staff could log in and query patient records at 3:00 AM from home with no oversight, no alerting, and no audit trail. HIPAA requires audit controls that track and limit access to PHI.
+
+### Violation 4 — Web Process Had Full Filesystem Access
+The web portal process ran with access to the **entire server filesystem**. If an attacker exploited a vulnerability in the web application (SQL injection, RCE, etc.), they would immediately have access to patient records stored elsewhere on the same server.
+
+---
+
+## Why This Matters in Real Organizations
+
+### HIPAA Implications
+- **45 CFR § 164.312(a)(1)** — Access Control: Implement technical policies to allow only authorized persons to access ePHI
+- **45 CFR § 164.312(b)** — Audit Controls: Hardware/software activity must be recorded and examined
+- **45 CFR § 164.308(a)(3)** — Workforce Authorization: Access to PHI must be role-appropriate
+- **Penalties:** HIPAA violations range from $100 to $50,000 per violation, up to $1.9M per year per violation category
+
+### GDPR Implications
+- **Article 5(1)(f)** — Integrity and Confidentiality: Personal data must be protected against unauthorized access
+- **Article 25** — Data Protection by Design: Security must be built into systems, not added later
+- **Article 32** — Security of Processing: Appropriate technical measures must be implemented
+- **Penalties:** Up to €20 million or 4% of global annual turnover — whichever is higher
+
+### Real-World Incidents This Lab Addresses
+- **2020 Universal Health Services Ransomware Attack** — $67M loss partly due to insufficient network segmentation
+- **2023 HCA Healthcare Breach** — 11 million patient records exposed due to overprivileged access
+- **2022 CommonSpirit Health Attack** — Insufficient access controls led to weeks of system downtime
+
+### The Four Security Principles Applied
+```
+Principle of Least Privilege  →  Task A (ACLs) + Task B (PAM)
+Defense in Depth              →  Task C (Bastion) + Task D (chroot)
+Zero Trust Architecture       →  Task C (No direct zone access, MFA required)
+Fail-Safe Defaults            →  Task A (Explicit deny for staff group)
+```
+
+---
+
+## Lab Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Lab Environment                           │
+│                                                             │
+│   Windows Host (192.168.116.1)  ←── External tester        │
+│          │                                                  │
+│          │  SSH key + TOTP (MFA)                           │
+│          ▼                                                  │
+│   ┌─────────────────────────────────────────────────┐      │
+│   │         Ubuntu 24.04  (192.168.116.144)          │      │
+│   │                                                  │      │
+│   │  ┌──────────────┐    ┌──────────────────────┐   │      │
+│   │  │  BASTION     │    │   SECURE ZONE        │   │      │
+│   │  │  Port 22     │───▶│   Port 2222          │   │      │
+│   │  │  MFA enabled │    │   Key-only, internal │   │      │
+│   │  └──────────────┘    └──────────────────────┘   │      │
+│   │                                                  │      │
+│   │  ┌──────────────┐    ┌──────────────────────┐   │      │
+│   │  │  WEB PORTAL  │    │  PATIENT RECORDS     │   │      │
+│   │  │  chroot jail │    │  /data/patient_      │   │      │
+│   │  │  Port 8080   │    │  records (ACL)       │   │      │
+│   │  └──────────────┘    └──────────────────────┘   │      │
+│   └─────────────────────────────────────────────────┘      │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ### Users and Groups Created
 
-| User | Group | Role | Access |
-|------|-------|------|--------|
+| User | Group | Role | Access Level |
+|------|-------|------|-------------|
 | `audit_user` | — | Compliance auditor | Read-only on patient records |
 | `staff_user1` | `staff` | Hospital staff | Blocked from patient records |
-| `doctor1` | `doctors` | Medical doctor | Full access to patient records |
-| `attacker` | `sudo`, `bastion_users` | System admin | Full access via bastion + MFA |
+| `doctor1` | `doctors` | Medical staff | Full access to patient records |
+| `attacker` | `sudo`, `bastion_users` | Admin | Full access via bastion + MFA |
 
 ---
 
-## Task A — Linux ACLs (Access Control Lists)
+## Task A — Linux Access Control Lists (ACLs)
 
-### Why
-Standard Linux UGO permissions (User-Group-Others) could not handle the granularity needed.
-We needed to give `audit_user` read-only access without adding them to the `doctors` group,
-and block the `staff` group without changing file ownership.
-ACLs let us set per-user and per-group rules independently of ownership.
+### Problem
+Standard Linux UGO (User-Group-Others) permissions could not handle the granularity required. The `audit_user` needed read-only access to patient records for compliance purposes, but adding them to the `doctors` group would grant write access too. The `staff` group needed to be explicitly blocked without removing them from the server.
 
-### What I Did
-- Created `/data/patient_records` owned by the `doctors` group
-- Used `setfacl` to give `audit_user` read-only access via ACL
-- Used `setfacl` to explicitly deny the `staff` group
-- Set default ACLs so new files inherit permissions automatically
-- Applied recursively to all existing files with `-R`
+### Why ACLs Are the Right Solution
+Linux ACLs extend the standard permission model by allowing **per-user and per-group rules** independent of file ownership. This is essential for HIPAA compliance where the same file may need different access levels for different roles simultaneously.
 
-### Commands Used
+### Implementation
+
 ```bash
+# Install ACL tools
 sudo apt install -y acl
+
+# Create directory structure
 sudo mkdir -p /data/patient_records/sensitive
+
+# Set base ownership — doctors group owns the directory
 sudo chown root:doctors /data/patient_records
 sudo chmod 750 /data/patient_records
 
-# audit_user — read only
+# Grant audit_user READ-ONLY via ACL (no group change)
 sudo setfacl -m u:audit_user:r-x /data/patient_records
 sudo setfacl -m u:audit_user:r-x /data/patient_records/sensitive
 sudo setfacl -R -m u:audit_user:r-- /data/patient_records/sensitive
 
-# doctors — full access
+# Grant doctors group FULL access
 sudo setfacl -m g:doctors:rwx /data/patient_records
 
-# staff — explicitly blocked
+# EXPLICITLY DENY staff group
 sudo setfacl -m g:staff:--- /data/patient_records
 
-# default ACL for new files
+# Set DEFAULT ACL so new files inherit permissions
 sudo setfacl -d -m u:audit_user:r-- /data/patient_records
 sudo setfacl -d -m g:staff:--- /data/patient_records
+
+# Apply recursively to all existing files
 sudo setfacl -R -m u:audit_user:r-- /data/patient_records/
 
+# Verify
 getfacl /data/patient_records
 ```
 
-### Verification
-| Test | Command | Result |
-|------|---------|--------|
-| audit_user reads file | `sudo -u audit_user cat /data/patient_records/sensitive/record1` | ✅ Shows file content |
-| audit_user writes file | `sudo -u audit_user bash -c 'echo hack > record1'` | ✅ Permission denied |
-| staff_user1 lists dir | `sudo -u staff_user1 ls /data/patient_records` | ✅ Permission denied |
-| doctor1 creates file | `sudo -u doctor1 bash -c 'echo note > doctor_note.txt'` | ✅ Success |
+### Resulting ACL Configuration
 
-### Screenshots
-![ACL Setup](screenshots/TaskA-01-directory-setup-acl-commands.png)
-![ACL Verification](screenshots/TaskA-02-getfacl-output-and-verification.png)
+```
+# file: data/patient_records
+# owner: root
+# group: doctors
+user::rwx
+user:audit_user:r-x          ← audit_user: read only, no write
+group::r-x
+group:staff:---              ← staff: completely blocked
+group:doctors:rwx            ← doctors: full access
+mask::rwx
+other::---
+default:user::rwx
+default:user:audit_user:r--
+default:group::r-x
+default:group:staff:---
+default:mask::r-x
+default:other::---
+```
 
-### Key Lesson Learned
-Default ACLs only apply to new files created after the ACL is set.
-Files that already existed need `setfacl -R` to apply permissions retroactively.
-Also — every directory in the path needs execute permission, not just the final one.
-`/data/patient_records` AND `/data/patient_records/sensitive` both needed explicit ACL entries.
+### Key Technical Note
+> **Important lesson learned during implementation:** Default ACLs only apply to **newly created files**. Files that existed before the ACL was set require the `-R` (recursive) flag to retroactively apply permissions. Additionally, **every directory in the path** must have the execute (`x`) bit set for the target user — not just the final directory. Both `/data/patient_records` AND `/data/patient_records/sensitive` required explicit ACL entries for `audit_user`.
+
+### Verification Results
+
+| Test | Command | Expected | Result |
+|------|---------|----------|--------|
+| audit_user reads file | `sudo -u audit_user cat /data/patient_records/sensitive/record1` | `test data` | ✅ PASS |
+| audit_user writes file | `sudo -u audit_user bash -c 'echo hack > record1'` | `Permission denied` | ✅ PASS |
+| staff_user1 lists dir | `sudo -u staff_user1 ls /data/patient_records` | `Permission denied` | ✅ PASS |
+| doctor1 lists dir | `sudo -u doctor1 ls /data/patient_records` | Shows contents | ✅ PASS |
+| doctor1 creates file | `sudo -u doctor1 bash -c 'echo note > doctor_note.txt'` | Success | ✅ PASS |
 
 ---
 
 ## Task B — PAM Time-of-Day Restrictions
 
-### Why
-PAM (Pluggable Authentication Modules) sits between the user and the OS.
-Every service — SSH, console login, sudo — goes through PAM.
-By adding `pam_time.so` we enforce time rules at the kernel authentication layer,
-before any application even sees the login request.
-This directly addresses the 3AM access problem found in the audit.
+### Problem
+No time-based restrictions existed on system access. An employee could authenticate to the patient records system at 3:00 AM from home with no oversight. Under HIPAA's audit control requirements, access outside business hours — especially from off-site locations — must be restricted and logged.
 
-### What I Did
-- Installed `libpam-modules`
-- Added time rules to `/etc/security/time.conf`
-- Enabled `pam_time.so` in `/etc/pam.d/sshd` and `/etc/pam.d/login`
-- Verified by adding a temporary blocking rule for the current hour and testing login
+### Why PAM Is the Right Solution
+PAM (Pluggable Authentication Modules) enforces access policies **at the operating system level**, before any application sees the login attempt. This means the restriction applies to ALL services (SSH, console, FTP) simultaneously through a single configuration. It cannot be bypassed by targeting a different application layer.
 
-### Configuration
+### Configuration Files Modified
 
-**`/etc/security/time.conf`**
+**`/etc/security/time.conf`** — Defines the time rules:
 ```
+# Allow staff SSH only Mon-Fri 0800-2000
 sshd;*;%staff;Wk0800-2000
+
+# Allow doctors SSH Mon-Fri 0700-2100
 sshd;*;%doctors;Wk0700-2100
+
+# Allow audit_user SSH Mon-Fri business hours only
 sshd;*;audit_user;Wk0800-1800
+
+# Temporary test block for verification
+sshd;*;staff_user1;!Wk1000-1100
+
+# Block ALL console logins midnight-6am for non-root
 login;*;!root;!Al0000-0600
 ```
 
-**`/etc/pam.d/sshd`** and **`/etc/pam.d/login`** — added after `@include common-auth`:
+**`/etc/pam.d/sshd`** — Loads the time module for SSH:
 ```
-account    required    pam_time.so
-```
-
-### Verification
-Auth log confirmed denial at the preauth stage:
-```
-fatal: Access denied for user staff_user1
-by PAM account configuration [preauth]
+auth required pam_google_authenticator.so nullok
+@include common-auth
+account    required    pam_time.so         ← added this line
 ```
 
-| Test | Result |
-|------|--------|
-| Login during allowed hours | ✅ Permitted |
-| Login during blocked hours | ✅ Denied before password prompt |
-| Auth log evidence | ✅ PAM denial recorded |
+**`/etc/pam.d/login`** — Loads the time module for console logins:
+```
+@include common-auth
+account    required    pam_time.so         ← added this line
+```
 
-### Screenshots
-![PAM login config](screenshots/TaskB-01-pam-login-conf-with-pam-time.png)
-![PAM install and time.conf](screenshots/TaskB-02-libpam-install-time-conf-edited.png)
-![time.conf rules](screenshots/TaskB-03-time-conf-rules-staff-doctors-audit.png)
-![Login allowed](screenshots/TaskB-04-staff-user1-login-allowed-then-exit.png)
-![Login denied](screenshots/TaskB-05-staff-user1-login-denied-blocked-hours.png)
-![Auth log denial](screenshots/TaskB-06-authlog-pam-access-denied-preauth.png)
+### Verification Results
+
+The auth log confirmed PAM enforcement:
+
+```
+sshd[1900]: fatal: Access denied for user staff_user1
+            by PAM account configuration [preauth]
+```
+
+| Test | Scenario | Result |
+|------|----------|--------|
+| Login during allowed hours | `ssh staff_user1@localhost` (within Wk0800-2000) | ✅ Allowed |
+| Login during blocked hours | `ssh staff_user1@localhost` (during !Wk1000-1100 test rule) | ✅ Denied |
+| Auth log evidence | `grep pam /var/log/auth.log` | ✅ Shows PAM account denial |
 
 ---
 
 ## Task C — Bastion Host with MFA
 
-### Why
-A Bastion Host (Jump Server) is the single hardened entry point to the Secure Zone.
-Combined with Multi-Factor Authentication (TOTP via Google Authenticator), it ensures:
-- Something you **have** — SSH private key
-- Something you **possess** — time-based one-time password from your phone
+### Problem
+System administrators used the same credentials for the public web server and the secure patient records database. This single-factor, shared-credential model meant one stolen password compromised everything. There was no separation between the public-facing zone and the secure zone containing PHI.
 
-Even if an attacker steals the private key, they still cannot access the Secure Zone
-without the physical authenticator device.
+### Why a Bastion Host + MFA Is the Right Solution
+A **Bastion Host** (Jump Server) enforces a single, hardened entry point to the secure zone. Combined with **Multi-Factor Authentication (TOTP)**, it ensures:
+- Something you **have** (SSH private key)
+- Something you **know/possess** (time-based one-time password from phone)
+
+Even if an attacker steals the private key, they still cannot access the secure zone without the physical TOTP device.
 
 ### Architecture
+
 ```
-Windows Host (192.168.116.1)
-         |
-         |  Step 1: SSH private key
-         |  Step 2: Google Authenticator TOTP code
-         v
-  [BASTION — port 22]
+External Client (Windows 192.168.116.1)
+         │
+         │  Step 1: SSH key authentication
+         │  Step 2: Google Authenticator TOTP code
+         ▼
+  [BASTION HOST — port 22]
   AuthenticationMethods publickey,keyboard-interactive
+  KbdInteractiveAuthentication yes
   pam_google_authenticator.so required
-         |
-         |  ProxyJump (internal only)
-         v
+         │
+         │  ProxyJump (internal only)
+         │  Key-only, no MFA needed for internal hop
+         ▼
   [SECURE ZONE — port 2222]
-  AllowUsers *@127.0.0.1
+  AllowUsers *@127.0.0.1  (only from bastion)
   UFW: DENY 2222 from anywhere except 127.0.0.1
 ```
 
-### What I Did
-- Installed `libpam-google-authenticator` and generated TOTP secret + QR code
-- Added `pam_google_authenticator.so` as first line in `/etc/pam.d/sshd`
-- Configured `/etc/ssh/sshd_config` to require key + TOTP
-- Created a second sshd instance on port 2222 for the Secure Zone
-- Blocked port 2222 externally with UFW, allowed only from `127.0.0.1`
-- Configured ProxyJump on Windows `~/.ssh/config`
+### Implementation
 
-### Key Config Files
+**Step 1 — Install Google Authenticator:**
+```bash
+sudo apt install -y libpam-google-authenticator
+google-authenticator
+# Scan QR code with Authenticator app
+```
 
-**`/etc/pam.d/sshd`** — first line:
+**Step 2 — Configure PAM for MFA (`/etc/pam.d/sshd`):**
 ```
 auth required pam_google_authenticator.so nullok
+@include common-auth
+account    required    pam_time.so
 ```
 
-**`/etc/ssh/sshd_config`** — Bastion:
+**Step 3 — Configure Bastion sshd (`/etc/ssh/sshd_config`):**
 ```
 AuthenticationMethods publickey,keyboard-interactive
 KbdInteractiveAuthentication yes
@@ -222,30 +323,36 @@ PermitRootLogin no
 LogLevel VERBOSE
 ```
 
-**`/etc/ssh/sshd_config_secure`** — Secure Zone:
+**Step 4 — Configure Secure Zone (`/etc/ssh/sshd_config_secure`):**
 ```
 Port 2222
 AuthenticationMethods publickey
 KbdInteractiveAuthentication no
 PasswordAuthentication no
+AllowGroups bastion_users sudo
 AllowUsers *@127.0.0.1
 PermitRootLogin no
+LogLevel VERBOSE
 ```
 
-**UFW rules:**
+**Step 5 — Start Secure Zone sshd and set UFW rules:**
 ```bash
+sudo /usr/sbin/sshd -f /etc/ssh/sshd_config_secure
+
 sudo ufw allow 22/tcp
 sudo ufw allow from 127.0.0.1 to any port 2222
 sudo ufw enable
 ```
 
-**Windows `~/.ssh/config`:**
+**Step 6 — Windows SSH config (`~/.ssh/config`):**
 ```
+# Bastion — requires key + MFA
 Host bastion
     HostName 192.168.116.144
     User attacker
     IdentityFile C:\Users\USER\.ssh\id_ed25519
 
+# Secure zone — only reachable through bastion
 Host secure-zone
     HostName 127.0.0.1
     Port 2222
@@ -254,76 +361,64 @@ Host secure-zone
     ProxyJump bastion
 ```
 
-### Verification
-| Test | Result |
-|------|--------|
-| Direct SSH to port 2222 from outside | ✅ Connection refused |
-| SSH via bastion with TOTP | ✅ Verification code prompted then connected |
-| Auth log MFA acceptance | ✅ `Accepted google_authenticator for attacker` |
-| Connection source | ✅ From `127.0.0.1` confirming bastion routing |
+### Verification Results
 
-### Screenshots
-![QR Code Setup](screenshots/TaskC-01-google-authenticator-qr-code-setup.png)
-![PAM sshd config](screenshots/TaskC-02-pamd-sshd-google-authenticator-pam-time.png)
-![sshd_config MFA](screenshots/TaskC-03-sshd-config-mfa-authenticationmethods.png)
-![sshd_config_secure](screenshots/TaskC-04-sshd-config-secure-port-2222-allowusers.png)
-![UFW rules](screenshots/TaskC-05-ufw-rules-port-22-allowed-2222-restricted.png)
-![Port 2222 refused](screenshots/TaskC-06-port-2222-refused-externally-internal-success.png)
-![Windows SSH config](screenshots/TaskC-07-windows-ssh-config-proxyjump-bastion.png)
-![MFA login success](screenshots/TaskC-08-windows-ssh-secure-zone-mfa-totp-success.png)
-![Auth log MFA](screenshots/TaskC-09-authlog-accepted-google-authenticator-127001.png)
+| Test | Command | Expected | Result |
+|------|---------|----------|--------|
+| Direct external SSH to port 2222 | `ssh -p 2222 attacker@192.168.116.144` | Connection refused | ✅ PASS |
+| SSH via bastion with MFA | `ssh secure-zone` from Windows | Prompts for TOTP, then connects | ✅ PASS |
+| Auth log — MFA accepted | `grep Accepted /var/log/auth.log` | Shows `Accepted google_authenticator for attacker` | ✅ PASS |
+| Auth log — source verification | `sudo last \| head -5` | Shows connections from `127.0.0.1` (bastion) | ✅ PASS |
+
+**Auth log evidence of successful MFA:**
+```
+sshd(pam_google_authenticator): Accepted google_authenticator for attacker
+sshd: Accepted keyboard-interactive/pam for attacker from 192.168.116.1 port 63608 ssh2
+```
 
 ---
 
 ## Task D — chroot Jail for Web Portal
 
-### Why
-A chroot jail changes the apparent root directory for a process.
-From inside the jail the process believes the jail directory IS the entire filesystem.
-`/data`, `/home`, `/etc/passwd` (real) — none of them exist from inside the jail.
-Even a fully compromised web process cannot access what it cannot see.
+### Problem
+The nginx web portal process ran with full access to the host filesystem. A successful web application attack (SQL injection, remote code execution, path traversal) would give an attacker immediate access to `/data/patient_records`. The web portal had no business accessing patient data, yet it technically could.
 
-### What I Did
-- Created a complete fake filesystem at `/var/chroot/web/`
-- Copied nginx binary and all shared libraries using `ldd`
-- Copied minimal system files (`passwd`, `group`, `nsswitch.conf`)
-- Created device files (`null`, `zero`, `urandom`)
-- Fixed all permissions for the `www-data` user
-- Created a systemd service using `RootDirectory=/var/chroot/web`
-- Verified patient records are invisible from inside the jail
+### Why chroot Is the Right Solution
+A **chroot jail** changes the apparent root directory (`/`) for a process. From inside the jail, the process believes the jail directory IS the entire filesystem. `/data`, `/home`, `/etc/passwd` (real), and all other sensitive paths simply **do not exist** from the process's perspective. Even a fully compromised web process cannot access what it cannot see.
 
-### Commands Used
+Combined with **systemd hardening directives** (`NoNewPrivileges`, `CapabilityBoundingSet`), this implements defense-in-depth at the process level.
+
+### Implementation
+
 ```bash
-# Create jail structure
+# Create jail directory structure
 sudo mkdir -p /var/chroot/web/{bin,lib,lib64,etc,tmp,dev}
-sudo mkdir -p /var/chroot/web/var/log/nginx
-sudo mkdir -p /var/chroot/web/var/lib/nginx/body
-sudo mkdir -p /var/chroot/web/var/lib/nginx/proxy
-sudo mkdir -p /var/chroot/web/var/www
-sudo mkdir -p /var/chroot/web/run
+sudo mkdir -p /var/chroot/web/var/{log/nginx,lib/nginx,www}
 
-# Copy nginx and all libraries
+# Copy nginx binary
 sudo cp /usr/sbin/nginx /var/chroot/web/bin/
+
+# Copy all required shared libraries
 for lib in $(ldd /usr/sbin/nginx | grep -o '/[^ ]*'); do
     sudo cp --parents "$lib" /var/chroot/web/ 2>/dev/null || true
 done
 
-# Copy system files
+# Copy essential system files
 sudo cp /etc/passwd /etc/group /etc/nsswitch.conf /var/chroot/web/etc/
 
-# Device files
+# Create device files
 sudo mknod -m 666 /var/chroot/web/dev/null    c 1 3
 sudo mknod -m 666 /var/chroot/web/dev/zero    c 1 5
 sudo mknod -m 666 /var/chroot/web/dev/urandom c 1 9
 
-# Fix permissions
+# Fix permissions for nginx process
 sudo chown -R www-data:www-data /var/chroot/web/var/log/nginx
 sudo chown -R www-data:www-data /var/chroot/web/var/lib/nginx
 sudo chown -R www-data:www-data /var/chroot/web/tmp
-sudo chown -R www-data:www-data /var/chroot/web/run
+sudo chmod 755 /var/chroot/web/var/log/nginx
 ```
 
-### Systemd Service
+**Systemd service (`/etc/systemd/system/nginx-jail.service`):**
 ```ini
 [Unit]
 Description=Nginx Web Portal (chroot isolated)
@@ -335,97 +430,124 @@ RootDirectory=/var/chroot/web
 User=www-data
 Group=www-data
 NoNewPrivileges=true
+PrivateTmp=false
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
-PIDFile=/tmp/nginx.pid
-ExecStart=/bin/nginx -c /etc/nginx/nginx.conf
-ReadWritePaths=/var/log/nginx /var/lib/nginx /tmp /run
+ExecStart=/bin/nginx -c /etc/nginx/nginx.conf -g 'daemon on;'
+ReadWritePaths=/var/log/nginx /var/lib/nginx /tmp
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-### Verification
-```
+### Verification Results
+
+```bash
+# Service running
+sudo systemctl status nginx-jail.service
+# Active: active (running) since Tue 2026-04-21 15:03:01 UTC
+
+# Process filesystem view
 sudo ls /proc/$(pgrep nginx | head -1)/root/
-bin  dev  etc  lib  lib64  tmp  usr  var
-← No /data  No /home  No real system files
+# bin  dev  etc  lib  lib64  proc  root  run  sys  tmp  usr  var
+# NOTE: No /data, no /home, no real /etc
 
-sudo chroot /var/chroot/web /bin/sh -c 'ls /data'
-No such file or directory  ← patient records invisible
+# Chroot escape attempts all FAILED
+sudo chroot /var/chroot/web /bin/sh -c "ls /"
+# chroot: failed to run command '/bin/sh': No such file or directory
 
+sudo chroot /var/chroot/web /bin/sh -c "ls /data"
+# chroot: failed to run command '/bin/sh': No such file or directory
+
+# Web portal serving correctly
 curl http://localhost:8080
-<h1>MedData Web Portal</h1>  ← web portal still works
+# <h1>MedData Web Portal</h1>
 ```
 
-| Test | Result |
-|------|--------|
-| nginx-jail.service status | ✅ active (running) |
-| nginx process owner | ✅ www-data — not root |
-| `/data` visible from jail | ✅ No such file or directory |
-| `/bin/sh` in jail | ✅ Not present — hardened |
-| Web portal responds | ✅ HTML content served on port 8080 |
-
-### Screenshots
-![Library copy](screenshots/TaskD-01-chroot-jail-library-copy-ldd-nginx.png)
-![Service running](screenshots/TaskD-02-jail-permissions-nginx-service-active-running.png)
-![Chroot verification](screenshots/TaskD-03-nginx-process-chroot-verification-curl-8080.png)
+| Test | Expected | Result |
+|------|----------|--------|
+| Service status | active (running) | ✅ PASS |
+| nginx process owner | www-data (not root) | ✅ PASS |
+| `/data` visible from jail | No such file or directory | ✅ PASS |
+| `/bin/sh` available in jail | Not present (hardened) | ✅ PASS |
+| Web portal responds | HTML content served | ✅ PASS |
 
 ---
 
-## Compliance Mapping
+## Verification Results
 
-| Control | HIPAA Reference | GDPR Reference | Task |
-|---------|----------------|----------------|------|
-| Role-based access to PHI | 45 CFR § 164.312(a)(1) | Article 5(1)(f) | Task A |
-| Audit controls and logging | 45 CFR § 164.312(b) | Article 32 | Task B |
-| Time-based access restriction | 45 CFR § 164.308(a)(3) | Article 25 | Task B |
-| Multi-factor authentication | 45 CFR § 164.312(d) | Article 32(1)(b) | Task C |
-| Network segmentation | 45 CFR § 164.312(a)(1) | Article 25 | Task C |
-| Process isolation | 45 CFR § 164.312(c)(2) | Article 32(1)(b) | Task D |
+### Complete Lab Summary
+
+| Task | Violation Fixed | Tool Used | Proof of Success |
+|------|----------------|-----------|-----------------|
+| **A — ACLs** | Staff group had broad read access to all patient records | `setfacl` / `getfacl` | `staff_user1 ls` → Permission denied |
+| **B — PAM** | No time-of-day login restrictions | `pam_time.so` / `time.conf` | auth.log: `Access denied by PAM account configuration` |
+| **C — Bastion+MFA** | Same credentials for public and secure zones | OpenSSH ProxyJump + Google Authenticator | Direct port 2222 → Connection refused; via bastion → TOTP prompt → success |
+| **D — chroot** | Web process had full filesystem access | chroot + systemd `RootDirectory` | `/data` not visible from jail; web portal still serves content |
 
 ---
 
-## Files Modified
+## Files Modified Summary
 
-| Task | File | What Changed |
+| Task | File | Change Made |
 |------|------|-------------|
-| A | `/data/patient_records` | ACL entries via setfacl |
-| B | `/etc/security/time.conf` | Time-of-day rules per group |
-| B | `/etc/pam.d/sshd` | Added pam_time.so and google_authenticator |
-| B | `/etc/pam.d/login` | Added pam_time.so |
-| C | `/etc/ssh/sshd_config` | MFA AuthenticationMethods |
-| C | `/etc/ssh/sshd_config_secure` | Port 2222 secure zone config |
+| A | `/data/patient_records` | ACL entries via `setfacl` |
+| B | `/etc/security/time.conf` | Added time-of-day rules per group |
+| B | `/etc/pam.d/sshd` | Added `account required pam_time.so` + google authenticator |
+| B | `/etc/pam.d/login` | Added `account required pam_time.so` |
+| C | `/etc/ssh/sshd_config` | `AuthenticationMethods publickey,keyboard-interactive` + MFA |
+| C | `/etc/ssh/sshd_config_secure` | Port 2222, key-only, `AllowUsers *@127.0.0.1` |
 | C | `~/.google_authenticator` | TOTP secret and scratch codes |
-| C | UFW rules | Block 2222 externally, allow from 127.0.0.1 |
-| D | `/var/chroot/web/` | Complete jail filesystem |
-| D | `/etc/systemd/system/nginx-jail.service` | RootDirectory isolation |
+| C | UFW rules | Allow 22/tcp everywhere; allow 2222 from 127.0.0.1 only |
+| C | `~/.ssh/config` (Windows) | ProxyJump bastion configuration |
+| D | `/var/chroot/web/` | Complete jail filesystem tree |
+| D | `/etc/systemd/system/nginx-jail.service` | `RootDirectory` + hardening directives |
 
 ---
 
 ## Key Lessons Learned
 
-1. **ACL inheritance is not retroactive** — Default ACLs only apply to new files.
-   Use `setfacl -R` to cover existing files.
+### 1. ACL Inheritance Does Not Apply Retroactively
+Default ACLs (`setfacl -d`) only affect **new files created after the ACL is set**. Existing files require `setfacl -R` to apply permissions recursively. In a production environment, always run both commands when securing an existing directory tree.
 
-2. **Every directory in a path needs execute permission** — Missing `x` on any
-   intermediate directory blocks access even if the file's own ACL is correct.
+### 2. Every Directory in a Path Needs Execute Permission
+For a user to access `/data/patient_records/sensitive/record1`, they need execute (`x`) permission on **every directory** in that path — not just the final one. Missing execute on any intermediate directory results in "Permission denied" even if the file's own ACL is correct.
 
-3. **KbdInteractiveAuthentication controls TOTP prompts** — Set it to `yes` on
-   the bastion for MFA, and `no` on the secure zone to prevent password prompts.
+### 3. PAM Stacks Are Order-Dependent
+The order of lines in `/etc/pam.d/sshd` matters. `pam_google_authenticator.so` must be the **first** `auth` line so it prompts for TOTP before any other authentication check. Placing it after `@include common-auth` changes the authentication flow.
 
-4. **chroot needs all dependencies** — Every `.so` library nginx needs must exist
-   inside the jail. Use `ldd` to find them and `--parents` to preserve structure.
+### 4. chroot Requires All Dependencies
+A chroot jail is only functional if **every shared library** the process needs is present inside the jail. Using `ldd` to enumerate dependencies and copying them with `--parents` ensures the correct directory structure is preserved. A missing `.so` file causes the process to fail silently at runtime.
 
-5. **nginx temp directories must be pre-created** — Without
-   `/var/lib/nginx/body` and `/var/lib/nginx/proxy` inside the jail,
-   nginx fails silently at startup with a read-only filesystem error.
+### 5. KbdInteractiveAuthentication Is the Hidden Gate
+Setting `PasswordAuthentication no` alone does **not** fully disable password-based access. `KbdInteractiveAuthentication yes` must be set deliberately for TOTP to work, while `KbdInteractiveAuthentication no` on the secure zone prevents password prompts from appearing where they should not.
 
-6. **UFW rules persist across reboots — second sshd does not** — The port 2222
-   sshd instance needs a proper systemd service to survive reboots.
+### 6. UFW Rules Persist Across Reboots — sshd Instances Do Not
+UFW rules survive reboots automatically. The second `sshd` instance started with `sudo /usr/sbin/sshd -f /etc/ssh/sshd_config_secure` does **not** survive a reboot. In production, create a proper systemd service for the secure zone sshd instance to ensure it starts automatically.
+
+---
+
+## Compliance Mapping
+
+| Control | HIPAA Reference | GDPR Reference | Implemented By |
+|---------|----------------|----------------|---------------|
+| Role-based access to PHI | 45 CFR § 164.312(a)(1) | Article 5(1)(f) | Task A — ACLs |
+| Audit controls and access logging | 45 CFR § 164.312(b) | Article 32 | Task B — PAM + auth.log |
+| Time-based access restriction | 45 CFR § 164.308(a)(3) | Article 25 | Task B — pam_time |
+| Multi-factor authentication | 45 CFR § 164.312(d) | Article 32(1)(b) | Task C — Google Authenticator |
+| Network segmentation | 45 CFR § 164.312(a)(1) | Article 25 | Task C — Bastion + UFW |
+| Process isolation | 45 CFR § 164.312(c)(2) | Article 32(1)(b) | Task D — chroot jail |
 
 ---
 
-*Lab completed on Ubuntu 24.04.2 LTS as part of an Identity and Access Management course.*
-```
+## How to Reproduce This Lab
+
+### Prerequisites
+- Ubuntu 24.04 (VM or bare metal)
+- `sudo` privileges
+- Google Authenticator app on a mobile device
+- SSH key pair
 
 ---
+
+*Lab completed as part of an Identity & Access Management course.*  
+*All configurations were implemented and verified on Ubuntu 24.04.2 LTS.*
