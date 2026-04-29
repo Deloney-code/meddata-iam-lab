@@ -1,0 +1,38 @@
+# =============================================================
+# MedData Research Hospital — Nginx chroot Jail Service
+# Task D: Isolate web portal process from patient records
+# File: /etc/systemd/system/nginx-jail.service
+# =============================================================
+
+[Unit]
+Description=Nginx Web Portal (chroot isolated)
+After=network.target
+
+[Service]
+Type=forking
+
+# This is the chroot jail — nginx believes this IS the root filesystem
+# It cannot see /data, /home, or any real system files outside this path
+RootDirectory=/var/chroot/web
+
+# Run as restricted non-root user
+User=www-data
+Group=www-data
+
+# Prevent privilege escalation from inside the jail
+NoNewPrivileges=true
+
+# Limit what kernel capabilities the process can use
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
+
+# PID file inside the jail
+PIDFile=/tmp/nginx.pid
+
+# Start nginx using the jail's own config file
+ExecStart=/bin/nginx -c /etc/nginx/nginx.conf
+
+# Directories nginx is allowed to write to (inside the jail)
+ReadWritePaths=/var/log/nginx /var/lib/nginx /tmp /run
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,34 @@
+# =============================================================
+# MedData Research Hospital — Secure Zone SSH Configuration
+# Task C: Second sshd instance for the Secure Zone (port 2222)
+# File: /etc/ssh/sshd_config_secure
+# Started with: sudo /usr/sbin/sshd -f /etc/ssh/sshd_config_secure
+# =============================================================
+
+# Run on port 2222 — separate from the Bastion on port 22
+Port 2222
+
+# Separate PID file so it does not conflict with main sshd
+PidFile /run/sshd_secure.pid
+
+# Key-only authentication — no TOTP needed for internal hop
+AuthenticationMethods publickey
+
+# No keyboard-interactive — prevents password prompts
+KbdInteractiveAuthentication no
+
+# Password authentication completely disabled
+PasswordAuthentication no
+
+# Only allow admin groups
+AllowGroups bastion_users sudo
+
+# CRITICAL — only accept connections from localhost (the Bastion)
+# This means nobody can SSH directly to port 2222 from outside
+AllowUsers *@127.0.0.1
+
+# No root login allowed
+PermitRootLogin no
+
+# Log everything for audit trail
+LogLevel VERBOSE
